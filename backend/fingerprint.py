@@ -638,7 +638,7 @@ def enrich(devices: list[dict], timeout: float = 2.0) -> dict:
     except Exception as exc:  # noqa: BLE001 - enrichment must never fail a scan
         log.warning("fingerprint probes failed: %s", exc)
 
-    for device, extra in zip(devices, results):
+    for device, extra in zip(devices, results, strict=False):
         ip = device["ip"]
         info = device.setdefault("info", {})
         if ip in mdns:
