@@ -1,0 +1,23 @@
+# runtime state
+.venv/
+__pycache__/
+*.pyc
+backend/data/
+*.log
+*.tmp
+*.bak
+cookie.txt
+
+# tooling
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# vendored binaries are fetched, not committed (190 MB):
+#   ./tools/fetch-vendor.sh
+vendor/
+
+# local installs / build output
+dist/
+build/
+*.egg-info/

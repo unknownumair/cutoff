@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<script>
+/* Theme bootstrap: runs before the sheet paints, so there is no light/dark flash. */
+(function () {
+  try {
+    var saved = (localStorage.getItem('cutoff.theme') || localStorage.getItem('npent.theme'));
+    var theme = saved === 'light' || saved === 'dark' ? saved
+      : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = theme;
+  } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+})();
+</script>
+<title>CUTOFF · Network Map</title>
+<link rel="stylesheet" href="/assets/style.css">
+<!--CUTOFF_TOKEN-->
+</head>
+<body class="page-map">
+<div class="aurora" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none">
+        <circle cx="16" cy="16" r="12" stroke="currentColor" stroke-opacity=".25" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="7" stroke="currentColor" stroke-opacity=".45" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="2.4" fill="currentColor"/>
+        <path d="M16 4v4M16 24v4M4 16h4M24 16h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+    </span>
+    <div class="brand-text">
+      <h1>CUTOFF</h1>
+      <span>network sentinel</span>
+    </div>
+  </div>
+
+  <nav class="nav" aria-label="Sections">
+    <a href="/">Devices</a>
+    <a class="active" href="/map">Network map</a>
+    <a href="/nmap">Nmap</a>
+    <a href="/bettercap">Bettercap</a>
+    <a href="/ipv6">IPv6</a>
+  </nav>
+
+  <div class="netchip" id="netchip" title="Current network context">
+    <span class="dot"></span><span id="netchipText">connecting…</span>
+  </div>
+
+  <button class="btn ghost theme-toggle" id="themeToggle" type="button" aria-pressed="false" title="Switch to light theme">
+      <svg class="tt-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M10 2.4v2M10 15.6v2M2.4 10h2M15.6 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6 14 6M6 14l-1.4 1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <svg class="tt-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.2 12.4A6.6 6.6 0 0 1 7.6 3.8a6.9 6.9 0 1 0 8.6 8.6Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+      <span class="tt-label">Light mode</span>
+    </button>
+
+  <div class="top-actions">
+    <span class="badge" id="modeBadge">…</span>
+    <label class="switch" title="Refresh every 6 seconds">
+      <input type="checkbox" id="autoRefresh" checked>
+      <span class="track"><span class="thumb"></span></span>
+      <span class="switch-label">Live</span>
+    </label>
+    <button class="btn ghost" id="btnRefresh">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3a5 5 0 1 0 5 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M8 1v4h4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Refresh
+    </button>
+    <a class="btn primary" href="/">Devices</a>
+  </div>
+</header>
+
+<main class="map-main">
+  <div class="banner hidden" id="simBanner">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 1.5 13h13L8 2Z" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="11.4" r=".9" fill="currentColor"/></svg>
+    <span><strong>Simulation mode.</strong> The map shows the real inventory, but block actions are modelled — start with <code>sudo ./run.sh</code> for live enforcement.</span>
+  </div>
+
+  <section class="stats" aria-label="Network summary">
+    <article class="stat">
+      <div class="stat-icon warn"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="9" width="16" height="6" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6 6.5 10 3l4 3.5M10 3v6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div><span class="stat-label">Gateway</span><strong id="statGateway">—</strong><small id="statGatewayMac"></small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon accent"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="10" rx="1.8" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M7 16.5h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div>
+      <div><span class="stat-label">Connected</span><strong id="statConnected">—</strong><small id="statConnectedNote"></small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon danger"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M4.9 15.1 15.1 4.9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div>
+      <div><span class="stat-label">Blocked</span><strong id="statBlocked">—</strong><small id="statBlockedNote"></small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon blue"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.8 3 6v4.2c0 3.4 2.9 5.9 7 7 4.1-1.1 7-3.6 7-7V6l-7-3.2Z" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linejoin="round"/></svg></div>
+      <div><span class="stat-label">Segments</span><strong id="statSegments">—</strong><small id="statSegmentsNote"></small></div>
+    </article>
+  </section>
+
+  <section class="panel map-panel">
+    <div class="panel-head">
+      <div class="panel-title">
+        <h2>Devices connected to the gateway</h2>
+        <span class="pill" id="mapCount">0</span>
+      </div>
+      <div class="controls">
+        <div class="legend">
+          <span class="legend-item"><i class="dot-live"></i>Online</span>
+          <span class="legend-item"><i class="dot-blocked"></i>Blocked</span>
+          <span class="legend-item"><i class="dot-offline"></i>Offline</span>
+          <span class="legend-item"><i class="dot-self"></i>This host</span>
+        </div>
+      </div>
+    </div>
+    <div class="map-stage" id="mapStage">
+      <svg id="mapSvg" viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet"
+           role="img" aria-label="Topology of devices connected to the gateway"></svg>
+      <div class="map-tooltip hidden" id="mapTooltip"></div>
+      <div class="map-empty hidden" id="mapEmpty">
+        <div class="empty-radar" aria-hidden="true"><span></span><span></span><span></span></div>
+        <h3>Nothing to draw yet</h3>
+        <p>Scan the network from the devices page, then come back to see the topology.</p>
+        <a class="btn primary" href="/">Open devices</a>
+      </div>
+    </div>
+    <aside class="map-detail hidden" id="mapDetail" aria-live="polite"></aside>
+    <div class="panel-foot">
+      <span id="mapUpdated">never updated</span>
+      <span class="sep"></span>
+      <span id="mapMeta">—</span>
+      <span class="grow"></span>
+      <span>Click a node for its details</span>
+    </div>
+  </section>
+<footer class="foot" role="contentinfo">
+    <div class="foot-brand"><span class="foot-dot" aria-hidden="true"></span><b>CUTOFF</b><span class="foot-ver">v1.1</span></div>
+    <div class="foot-meta"><span>Builded for Community by 111</span></div>
+    <div class="foot-right"><span class="foot-chip">127.0.0.1 · 8848</span></div>
+  </footer>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/assets/theme.js" defer></script>
+<script src="/assets/map.js"></script>
+</body>
+</html>

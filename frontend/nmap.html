@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<script>
+/* Theme bootstrap: runs before the sheet paints, so there is no light/dark flash. */
+(function () {
+  try {
+    var saved = (localStorage.getItem('cutoff.theme') || localStorage.getItem('npent.theme'));
+    var theme = saved === 'light' || saved === 'dark' ? saved
+      : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.theme = theme;
+  } catch (e) { document.documentElement.dataset.theme = 'dark'; }
+})();
+</script>
+<title>CUTOFF · Nmap</title>
+<link rel="stylesheet" href="/assets/style.css">
+<!--CUTOFF_TOKEN-->
+</head>
+<body class="page-nmap">
+<div class="aurora" aria-hidden="true"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="12" stroke="currentColor" stroke-opacity=".25" stroke-width="1.5"/><circle cx="16" cy="16" r="7" stroke="currentColor" stroke-opacity=".45" stroke-width="1.5"/><circle cx="16" cy="16" r="2.4" fill="currentColor"/><path d="M16 4v4M16 24v4M4 16h4M24 16h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+    </span>
+    <div class="brand-text"><h1>CUTOFF</h1><span>network sentinel</span></div>
+  </div>
+  <nav class="nav" aria-label="Sections">
+    <a href="/">Devices</a>
+    <a href="/map">Network map</a>
+    <a class="active" href="/nmap">Nmap</a>
+    <a href="/bettercap">Bettercap</a>
+    <a href="/ipv6">IPv6</a>
+  </nav>
+  <div class="netchip" id="netchip"><span class="dot"></span><span id="netchipText">connecting…</span></div>
+  <button class="btn ghost theme-toggle" id="themeToggle" type="button" aria-pressed="false" title="Switch to light theme">
+      <svg class="tt-sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M10 2.4v2M10 15.6v2M2.4 10h2M15.6 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6 14 6M6 14l-1.4 1.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <svg class="tt-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M16.2 12.4A6.6 6.6 0 0 1 7.6 3.8a6.9 6.9 0 1 0 8.6 8.6Z" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/></svg>
+      <span class="tt-label">Light mode</span>
+    </button>
+
+  <div class="top-actions">
+    <span class="badge" id="modeBadge">…</span>
+    <button class="btn ghost" id="btnRefresh">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3a5 5 0 1 0 5 5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/><path d="M8 1v4h4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Refresh
+    </button>
+    <a class="btn primary" href="/">Devices</a>
+  </div>
+</header>
+
+<main class="map-main">
+  <div class="banner hidden" id="nmapBanner">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 1.5 13h13L8 2Z" stroke="currentColor" stroke-width="1.4" fill="none" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="8" cy="11.4" r=".9" fill="currentColor"/></svg>
+    <span id="nmapBannerText"></span>
+  </div>
+
+  <section class="stats" aria-label="Nmap summary">
+    <article class="stat">
+      <div class="stat-icon accent"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="9" cy="9" r="5" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="m13 13 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+      <div><span class="stat-label">Nmap</span><strong id="statNmapVersion">—</strong><small id="statNmapPath"></small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon blue"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 14V8M8 14V5M13 14v-4M18 14V3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>
+      <div><span class="stat-label">State</span><strong id="statNmapState">Idle</strong><small id="statNmapNote">no scan running</small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon warn"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M2.8 10h14.4M10 2.8c2 2.2 2 12.2 0 14.4M10 2.8c-2 2.2-2 12.2 0 14.4" stroke="currentColor" stroke-width="1.2" fill="none"/></svg></div>
+      <div><span class="stat-label">Network</span><strong id="statNmapNetwork">—</strong><small id="statNmapTargets">—</small></div>
+    </article>
+    <article class="stat">
+      <div class="stat-icon danger"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="4" width="15" height="12" rx="2" stroke="currentColor" stroke-width="1.5" fill="none"/><path d="M6 8h8M6 11h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></div>
+      <div><span class="stat-label">Hosts found</span><strong id="statNmapHosts">0</strong><small id="statNmapDuration">—</small></div>
+    </article>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div class="panel-title"><h2>Scan target</h2><span class="pill" id="targetPill">subnet</span></div>
+      <div class="controls">
+        <label class="mon-field"><span>Target</span>
+          <select class="input select" id="nmapTarget"></select>
+        </label>
+        <label class="mon-field" id="customWrap" style="display:none"><span>Custom IP / CIDR</span>
+          <input class="input" id="nmapCustom" placeholder="192.168.1.10" style="min-width:170px">
+        </label>
+      </div>
+    </div>
+    <div class="panel-foot"><span id="nmapStatus">Select a preset below. All targets are restricted to your local subnet.</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div class="panel-title"><h2>Presets</h2><span class="pill" id="presetCount">0</span></div>
+      <div class="controls"><button class="btn danger" id="btnNmapStop" disabled>Stop scan</button></div>
+    </div>
+    <div class="preset-grid" id="presetGrid"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <div class="panel-title"><h2>Hosts</h2><span class="pill" id="hostCount">0</span></div>
+      <div class="controls"><span class="muted" id="nmapCommand" style="font-family:var(--mono);font-size:10.5px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span></div>
+    </div>
+    <div class="table-wrap">
+      <table class="device-table" style="min-width:760px">
+        <thead><tr><th>Host</th><th>IP</th><th>Ports</th><th>OS</th><th>Scripts</th></tr></thead>
+        <tbody id="nmapHosts"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div class="panel-title"><h2>Raw output</h2></div></div>
+    <pre class="console" id="nmapOutput">No scan output yet.</pre>
+  </section>
+<footer class="foot" role="contentinfo">
+    <div class="foot-brand"><span class="foot-dot" aria-hidden="true"></span><b>CUTOFF</b><span class="foot-ver">v1.1</span></div>
+    <div class="foot-meta"><span>Builded for Community by 111</span></div>
+    <div class="foot-right"><span class="foot-chip">127.0.0.1 · 8848</span></div>
+  </footer>
+</main>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/assets/theme.js" defer></script>
+<script src="/assets/nmap.js"></script>
+</body>
+</html>

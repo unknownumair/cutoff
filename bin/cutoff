@@ -1,0 +1,157 @@
+#!/bin/sh
+# cutoff — control the CUTOFF console from anywhere.
+#
+#   cutoff                 start the service (or run in the foreground)
+#   cutoff serve           run in the foreground (Ctrl-C to stop)
+#   cutoff stop|restart    service control
+#   cutoff status          service + port + token
+#   cutoff logs            follow the service log
+#   cutoff url | token     where to open it / the API token
+#   cutoff doctor [--apply]  live plumbing self-check
+#   cutoff update          reinstall from this checkout (if run from one)
+#   cutoff uninstall       remove service, binary and install dir
+#   cutoff version
+#
+# Environment: CUTOFF_PREFIX (default /opt/cutoff),
+#              CUTOFF_DATA_DIR (default /var/lib/cutoff),
+#              CUTOFF_HOST / CUTOFF_PORT (default 127.0.0.1:8848).
+set -eu
+
+PREFIX="${CUTOFF_PREFIX:-/opt/cutoff}"
+DATA_DIR="${CUTOFF_DATA_DIR:-/var/lib/cutoff}"
+PY="$PREFIX/.venv/bin/python"
+APP="$PREFIX/backend/app.py"
+UNIT="cutoff"
+PUBLIC_HOST="${CUTOFF_HOST:-127.0.0.1}"
+PUBLIC_PORT="${CUTOFF_PORT:-8848}"
+
+die() { printf 'cutoff: %s\n' "$*" >&2; exit 1; }
+
+have_systemd() {
+  [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1
+}
+
+unit_installed() {
+  have_systemd && systemctl list-unit-files "${UNIT}.service" >/dev/null 2>&1 \
+    && systemctl list-unit-files "${UNIT}.service" 2>/dev/null | grep -q "^${UNIT}.service"
+}
+
+need_install() {
+  [ ! -x "$PY" ] || [ ! -f "$APP" ]
+}
+
+cmd_version() {
+  if [ -f "$PREFIX/VERSION" ]; then cat "$PREFIX/VERSION"; else echo "unknown"; fi
+}
+
+cmd_url() {
+  printf 'http://%s:%s/\n' "$PUBLIC_HOST" "$PUBLIC_PORT"
+}
+
+cmd_token() {
+  if [ -r "$DATA_DIR/api_token" ]; then cat "$DATA_DIR/api_token"; else
+    echo "no token yet — start CUTOFF once ($DATA_DIR/api_token is created on first run)" >&2
+    return 1
+  fi
+}
+
+cmd_serve() {
+  need_install && die "not installed at $PREFIX (run tools/install-global.sh)"
+  CUTOFF_DATA_DIR="$DATA_DIR" CUTOFF_HOST="$PUBLIC_HOST" CUTOFF_PORT="$PUBLIC_PORT" \
+    exec "$PY" "$APP"
+}
+
+cmd_start() {
+  need_install && die "not installed at $PREFIX (run tools/install-global.sh)"
+  if unit_installed; then
+    systemctl start "$UNIT" && cmd_status
+  else
+    echo "cutoff: no systemd unit — running in the foreground" >&2
+    cmd_serve
+  fi
+}
+
+cmd_stop() {
+  if unit_installed; then systemctl stop "$UNIT" && echo "stopped"; else
+    die "no systemd unit; stop the foreground process with Ctrl-C"
+  fi
+}
+
+cmd_restart() {
+  unit_installed || die "no systemd unit to restart"
+  systemctl restart "$UNIT" && cmd_status
+}
+
+cmd_status() {
+  printf 'CUTOFF %s\n' "$(cmd_version)"
+  printf '  install  %s\n' "$PREFIX"
+  printf '  data     %s\n' "$DATA_DIR"
+  printf '  url      %s\n' "$(cmd_url)"
+  if unit_installed; then
+    systemctl --no-pager --lines=0 status "$UNIT" | sed 's/^/  /'
+  else
+    echo "  service  not installed (foreground mode)"
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    if ss -ltn 2>/dev/null | grep -q ":${PUBLIC_PORT} "; then
+      echo "  listener port ${PUBLIC_PORT} open"
+    else
+      echo "  listener port ${PUBLIC_PORT} closed"
+    fi
+  fi
+}
+
+cmd_logs() {
+  unit_installed || die "no systemd unit; logs go to $DATA_DIR/cutoff.log"
+  exec journalctl -u "$UNIT" -f --no-pager
+}
+
+cmd_doctor() {
+  need_install && die "not installed at $PREFIX"
+  shift || true
+  CUTOFF_DATA_DIR="$DATA_DIR" exec "$PY" "$PREFIX/backend/doctor.py" "$@"
+}
+
+cmd_uninstall() {
+  printf 'This removes the service, %s and the data in %s.\n' "$PREFIX" "$DATA_DIR"
+  printf 'Type "yes" to continue: '
+  read -r answer
+  [ "$answer" = "yes" ] || die "aborted"
+  if unit_installed; then
+    systemctl disable --now "$UNIT" || true
+    rm -f "/etc/systemd/system/${UNIT}.service"
+    systemctl daemon-reload || true
+  fi
+  rm -rf "$PREFIX"
+  rm -rf "$DATA_DIR"
+  for bin in /usr/local/bin/cutoff /usr/bin/cutoff; do
+    [ -e "$bin" ] && rm -f "$bin"
+  done
+  echo "removed. (This shell may still have 'cutoff' cached; run 'hash -r'.)"
+}
+
+cmd_update() {
+  here="$(cd "$(dirname "$0")" && pwd)"
+  src="$(cd "$here/.." && pwd)"
+  [ -f "$src/tools/install-global.sh" ] || die "run 'cutoff update' from an extracted checkout, or rerun the installer"
+  CUTOFF_PREFIX="$PREFIX" CUTOFF_DATA_DIR="$DATA_DIR" exec sh "$src/tools/install-global.sh" --force
+}
+
+cmd="${1:-start}"
+case "$cmd" in
+  start)      cmd_start ;;
+  serve|run|foreground) cmd_serve ;;
+  stop)       cmd_stop ;;
+  restart)    cmd_restart ;;
+  status)     cmd_status ;;
+  logs)       cmd_logs ;;
+  url)        cmd_url ;;
+  token)      cmd_token ;;
+  doctor)     cmd_doctor "$@" ;;
+  update)     cmd_update ;;
+  uninstall)  cmd_uninstall ;;
+  version|-v|--version) cmd_version ;;
+  path)       printf '%s\n' "$PREFIX" ;;
+  help|-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$cmd' (try: cutoff help)" ;;
+esac

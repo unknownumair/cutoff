@@ -1,0 +1,30 @@
+flowchart TD
+    A([Start scan]) --> B[Read default route and interface]
+    B --> C{Raw socket allowed?}
+    C -- yes --> D[ARP sweep across the subnet]
+    C -- no --> E[ICMP ping sweep]
+    E --> F[Read kernel neighbour table]
+    D --> G[Reverse DNS + DHCP lease names]
+    F --> G
+    G --> H[OUI lookup and merge into inventory]
+    H --> I{Device selected}
+
+    I --> J{Block or unblock?}
+    J -- block --> K{Target is gateway or own MAC?}
+    K -- yes --> L[[Refuse unless force=true]]
+    K -- no --> M[Install tagged iptables rules<br/>MAC drop + IP drop]
+    M --> N{This host is the gateway?}
+    N -- yes --> O[FORWARD chain covers the whole LAN]
+    N -- no --> P[ARP reply: gateway lives at our MAC]
+    P --> Q[Refresh every 2 s, restore on unblock]
+    M --> R[Record block + audit event]
+    O --> R
+    Q --> R
+
+    J -- unblock --> S[Stop interception, restore ARP]
+    S --> T[Delete CUTOFF-tagged rules]
+    T --> U[Clear inventory block + audit event]
+
+    J -- cut wifi --> V{hostapd or monitor adapter?}
+    V -- yes --> W[Deauthenticate client]
+    V -- no --> X[[Report unavailable; Block remains the fallback]]
