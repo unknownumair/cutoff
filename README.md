@@ -19,24 +19,26 @@ installs globally as a single `cutoff` command.
 
 ## Contents
 
-1. [What it does](#what-it-does)
-2. [Install](#install)
-3. [Quick tour](#quick-tour)
-4. [How blocking works](#how-blocking-works)
-5. [IPv6](#ipv6)
-6. [Wi-Fi deauthentication](#wi-fi-deauthentication)
-7. [Nmap console](#nmap-console)
-8. [Bettercap console](#bettercap-console)
-9. [The `cutoff` command](#the-cutoff-command)
-10. [API](#api)
-11. [Configuration](#configuration)
-12. [Data, tokens and backups](#data-tokens-and-backups)
-13. [Platform support](#platform-support)
-14. [Troubleshooting](#troubleshooting)
-15. [Architecture](#architecture)
-16. [Development and tests](#development-and-tests)
-17. [Limits](#limits)
-18. [License](#license)
+| # | Section | What it covers |
+|---|---|---|
+| 1 | [What it does](#what-it-does) | Feature inventory at a glance |
+| 2 | [Install](#install) | Linux global install, Windows, source, bundled tools, live vs simulation |
+| 3 | [Quick tour](#quick-tour) | Every page and what you do on it |
+| 4 | [How blocking works](#how-blocking-works) | Chains, ARP black hole, isolation, guardrails |
+| 5 | [IPv6](#ipv6) | MAC, per-address and prefix rules, NDP, merged block |
+| 6 | [Wi-Fi deauthentication](#wi-fi-deauthentication) | hostapd and monitor-mode paths |
+| 7 | [Nmap console](#nmap-console) | Presets, targets, XML parsing, host sync |
+| 8 | [Bettercap console](#bettercap-console) | Presets, REPL session, warnings |
+| 9 | [The `cutoff` command](#the-cutoff-command) | CLI reference and install paths |
+| 10 | [API](#api) | All 25 token-gated routes with payloads |
+| 11 | [Configuration](#configuration) | Every `CUTOFF_*` variable |
+| 12 | [Data, tokens and backups](#data-tokens-and-backups) | Files, permissions, rotation, backup |
+| 13 | [Platform support](#platform-support) | Linux vs Windows capability matrix |
+| 14 | [Troubleshooting](#troubleshooting) | Symptom, cause, fix |
+| 15 | [Architecture](#architecture) | Modules and request flow |
+| 16 | [Development and tests](#development-and-tests) | Local setup, tests, lint, doctor |
+| 17 | [Limits](#limits) | What it cannot do, stated plainly |
+| 18 | [License](#license) | MIT and credit |
 
 ---
 
