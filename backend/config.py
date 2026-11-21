@@ -40,6 +40,9 @@ SCAN_MAX_HOSTS = int(_env("SCAN_MAX_HOSTS", "1024"))
 # Keep a device "online" for this long after its last confirmed sighting, so a
 # sleeping phone does not flap offline between scans.
 RECENT_WINDOW_SEC = int(_env("RECENT_SEC", "300"))
+# How often an active block re-reads the LAN peer list, so a device that joins
+# or is scanned after the block is poisoned too.
+PEER_REFRESH_SEC = float(_env("PEER_REFRESH", "10"))
 
 DEVICES_FILE = DATA_DIR / "devices.json"
 EVENTS_FILE = DATA_DIR / "events.jsonl"

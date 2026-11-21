@@ -28,6 +28,7 @@ import enforcer as enforcer_mod  # noqa: E402
 import fingerprint  # noqa: E402
 import firewall  # noqa: E402
 import ipv6 as ipv6_mod  # noqa: E402
+import ndpguard  # noqa: E402
 import monitor as monitor_mod  # noqa: E402
 import netinfo  # noqa: E402
 import nmapgui  # noqa: E402
@@ -1132,6 +1133,188 @@ class StoreIPv6Tests(unittest.TestCase):
         self.assertEqual(st.get("aa:bb:cc:dd:ee:21")["ip6"], [])
         reloaded = store_mod.Store(tmp / "devices.json", tmp / "events.jsonl")
         self.assertIn("ip6", reloaded.get("aa:bb:cc:dd:ee:21"))
+
+
+class NdpGuardTests(unittest.TestCase):
+    """IPv6 layer 2: frame construction, pairing, and the forwarding guard."""
+
+    OUR_MAC = "aa:aa:aa:aa:aa:aa"
+    VICTIM_MAC = "cc:cc:cc:cc:cc:cc"
+    ROUTER_MAC = "11:22:33:44:55:66"
+    OUR_LL = "fe80::99"
+
+    @staticmethod
+    def _checksum_valid(frame: bytes) -> bool:
+        ip = frame[14:54]
+        icmp = frame[54:]
+        pseudo = ip[8:24] + ip[24:40] + struct.pack("!I", len(icmp)) + b"\x00\x00\x00\x3a"
+        data = pseudo + icmp
+        if len(data) % 2:
+            data += b"\x00"
+        total = sum(struct.unpack(f"!{len(data) // 2}H", data))
+        while total >> 16:
+            total = (total & 0xFFFF) + (total >> 16)
+        return total == 0xFFFF
+
+    def test_na_frame_fields_and_checksum(self):
+        frame = ndpguard.na_frame(
+            dst_mac=self.VICTIM_MAC, src_mac=self.OUR_MAC,
+            src_ip=self.OUR_LL, dst_ip="fe80::7",
+            target_ip="fe80::1", tll_mac=self.OUR_MAC)
+        self.assertEqual(frame[12:14], b"\x86\xdd")
+        self.assertEqual(frame[20], 58)          # ICMPv6
+        self.assertEqual(frame[21], 255)         # NDP hop limit
+        self.assertEqual(frame[54], 136)         # Neighbor Advertisement
+        self.assertEqual(struct.unpack("!I", frame[58:62])[0], 0x20000000)  # O=1
+        self.assertEqual(frame[62:78], socket.inet_pton(socket.AF_INET6, "fe80::1"))
+        self.assertEqual(frame[78], 2)           # target link-layer option
+        self.assertEqual(frame[80:86], bytes.fromhex(self.OUR_MAC.replace(":", "")))
+        self.assertTrue(self._checksum_valid(frame))
+
+    def test_ns_frame_fields_and_checksum(self):
+        frame = ndpguard.ns_frame(
+            dst_mac=self.VICTIM_MAC, src_mac=self.OUR_MAC,
+            src_ip="2001:db8::9", dst_ip="fe80::7",
+            target_ip="fe80::7", sll_mac=self.OUR_MAC)
+        self.assertEqual(frame[54], 135)         # Neighbor Solicitation
+        self.assertEqual(frame[58:62], b"\x00" * 4)
+        self.assertEqual(frame[78], 1)           # source link-layer option
+        self.assertTrue(self._checksum_valid(frame))
+
+    def _blackhole(self, **kwargs):
+        params = dict(
+            iface="eno1", our_mac=self.OUR_MAC, our_ip6=self.OUR_LL,
+            victim_mac=self.VICTIM_MAC,
+            victim_addrs=["fe80::7", "2001:db8:1:2::7"],
+            router_ip="fe80::1", router_mac=self.ROUTER_MAC,
+        )
+        params.update(kwargs)
+        return ndpguard.NdpBlackhole(**params)
+
+    def test_pairs_cover_router_in_both_directions(self):
+        blackhole = self._blackhole()
+        keys = {(p["dst_mac"], p["spoof_ip"]) for p in blackhole.pairs}
+        self.assertEqual(len(blackhole.pairs), 3)
+        self.assertIn((self.VICTIM_MAC, "fe80::1"), keys)
+        self.assertIn((self.ROUTER_MAC, "fe80::7"), keys)
+        self.assertIn((self.ROUTER_MAC, "2001:db8:1:2::7"), keys)
+
+    def test_total_mode_poisons_known_peers(self):
+        peers = [{"mac": "dd:dd:dd:dd:dd:dd", "dst": "fe80::d",
+                  "addrs": ["fe80::d", "2001:db8:1:2::d"]}]
+        blackhole = self._blackhole(peers=peers, total=True)
+        # 1 victim->router + 2 router->victim + 2 victim->peer + 2 peer->victim
+        self.assertEqual(len(blackhole.pairs), 7)
+        self.assertEqual(blackhole.status()["peers"], 1)
+
+    def test_peer_provider_adds_pairs_after_start(self):
+        peers = [{"mac": "dd:dd:dd:dd:dd:dd", "dst": "fe80::d",
+                  "addrs": ["fe80::d"]}]
+        blackhole = self._blackhole(total=True, peer_provider=lambda: peers)
+        before = len(blackhole.pairs)
+        blackhole._refresh_peers()
+        self.assertEqual(len(blackhole.pairs), before + 3)
+
+    def test_start_refuses_forwarding_without_forward_drop(self):
+        blackhole = self._blackhole()
+        with mock.patch.object(ndpguard, "forwarding", return_value=True):
+            ok, msg = blackhole.start()
+        self.assertFalse(ok)
+        self.assertIn("MITM", msg)
+
+    def test_default_route_without_dev_group_is_parsed(self):
+        # `ip -6 route show default dev X` omits "dev X" from its output.
+        text = "default via fe80::1 proto ra metric 20100 pref medium\n"
+        self.assertEqual(ipv6_mod.parse_default_route(text, "eno1"), "fe80::1")
+
+    def test_default_route_skips_other_interfaces(self):
+        text = "default via fe80::1 dev wlan0 proto ra\n"
+        self.assertIsNone(ipv6_mod.parse_default_route(text, "eno1"))
+
+
+class PeerRefreshTests(unittest.TestCase):
+    """IPv4 peers that appear after the block must be added mid-flight."""
+
+    def test_set_peers_rebuilds_pairs_and_primes_nothing_yet(self):
+        blackhole = arpguard.ArpBlackhole(
+            "eno1", "10.0.0.5", "aa:aa:aa:aa:aa:aa",
+            "10.0.0.1", "bb:bb:bb:bb:bb:bb",
+            "10.0.0.9", "cc:cc:cc:cc:cc:cc", total=True)
+        self.assertEqual(len(blackhole.pairs), 2)
+        fresh = blackhole.set_peers([("10.0.0.3", "dd:dd:dd:dd:dd:dd")])
+        self.assertEqual(len(blackhole.pairs), 4)
+        self.assertEqual(len(fresh), 4)  # every pair is unprimed on first sight
+        self.assertEqual(len(blackhole.peers), 1)
+
+    def test_identical_peer_list_is_a_noop(self):
+        peers = [("10.0.0.3", "dd:dd:dd:dd:dd:dd")]
+        blackhole = arpguard.ArpBlackhole(
+            "eno1", "10.0.0.5", "aa:aa:aa:aa:aa:aa",
+            "10.0.0.1", "bb:bb:bb:bb:bb:bb",
+            "10.0.0.9", "cc:cc:cc:cc:cc:cc", peers=peers, total=True)
+        self.assertEqual(blackhole.set_peers(peers), [])
+
+    def test_arp_request_is_a_request_not_a_reply(self):
+        frame = arpguard.arp_request(
+            dst_mac="dd:dd:dd:dd:dd:dd", src_mac="aa:aa:aa:aa:aa:aa",
+            sender_ip="10.0.0.9", sender_mac="aa:aa:aa:aa:aa:aa",
+            target_ip="10.0.0.3", target_mac="dd:dd:dd:dd:dd:dd")
+        self.assertEqual(frame[12:14], b"\x08\x06")
+        self.assertEqual(struct.unpack("!H", frame[20:22])[0], 1)  # opcode request
+
+
+class NdpEnforcerTests(unittest.TestCase):
+    """The enforcer must start the v6 layer 2 cut and report it honestly."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cutoff-ndp-enf-"))
+        self.store = store_mod.Store(self.tmp / "devices.json", self.tmp / "events.jsonl")
+        self.store.upsert_scan([{
+            "mac": "aa:bb:cc:dd:ee:01", "ip": "10.0.0.2",
+            "ip6": ["2001:db8:1:2::7", "fe80::7"],
+        }])
+        self.iface = netinfo.Interface(
+            name="eno1", ip="10.0.0.5", prefix=24, mac="aa:bb:cc:dd:ee:99",
+            gateway="10.0.0.1", gateway_mac="11:22:33:44:55:66", wireless=False)
+        self.enforcer = enforcer_mod.Enforcer(
+            self.store, firewall.Firewall(simulate=True), self.iface, True)
+        self.patches = [
+            mock.patch.object(ipv6_mod, "local_addresses",
+                              return_value=[{"address": "fe80::99",
+                                             "class": "link-local"}]),
+            mock.patch.object(ipv6_mod, "default_router", return_value="fe80::1"),
+            mock.patch.object(ipv6_mod, "router_mac", return_value="11:22:33:44:55:66"),
+            mock.patch.object(ipv6_mod, "neighbours", return_value=[
+                {"ip": "fe80::7", "mac": "aa:bb:cc:dd:ee:01", "iface": "eno1",
+                 "state": "REACHABLE", "router": False, "class": "link-local"}]),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self.patches:
+            patcher.stop()
+
+    def test_block_starts_ndp_layer(self):
+        result = self.enforcer.block("aa:bb:cc:dd:ee:01", mode="both")
+        self.assertTrue(result["ok"])
+        self.assertIn("ndp-blackhole:full", result["layers"])
+        self.assertGreaterEqual(result["ndp"]["pairs"], 3)
+        self.assertEqual(result["ndp"]["router"], "fe80::1")
+        self.assertTrue(any("NDP black-hole" in w for w in result["warnings"]))
+        self.assertFalse(any("need gateway/AP enforcement" in w
+                             for w in result["warnings"]))
+
+    def test_block_can_skip_ndp(self):
+        result = self.enforcer.block("aa:bb:cc:dd:ee:01", mode="both", ip6_ndp=False)
+        self.assertTrue(result["ok"])
+        self.assertFalse(any(l.startswith("ndp-blackhole") for l in result["layers"]))
+
+    def test_unblock_stops_ndp(self):
+        self.enforcer.block("aa:bb:cc:dd:ee:01", mode="both")
+        self.assertIn("aa:bb:cc:dd:ee:01", self.enforcer._ndp)
+        self.enforcer.unblock("aa:bb:cc:dd:ee:01")
+        self.assertNotIn("aa:bb:cc:dd:ee:01", self.enforcer._ndp)
 
 
 if __name__ == "__main__":

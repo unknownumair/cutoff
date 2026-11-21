@@ -394,7 +394,8 @@ def api_block():
     ip6 = payload.get("ip6", True)
     result = enforcer.block(mac, mode=mode, force=force, isolation=isolation,
                             ip6=bool(ip6),
-                            ip6_prefix=bool(payload.get("ip6_prefix", False)))
+                            ip6_prefix=bool(payload.get("ip6_prefix", False)),
+                            ip6_ndp=bool(payload.get("ip6_ndp", True)))
     _invalidate_ipv6()
     return jsonify(result), (200 if result.get("ok") else 400)
 

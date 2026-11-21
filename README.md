@@ -50,7 +50,7 @@ installs globally as a single `cutoff` command.
 | **Fingerprinting** | mDNS instances and models, NetBIOS, SSDP/UPnP, HTTP titles + `Server`, TLS certificate (subject/issuer/SAN), SNMP `sysName`/`sysDescr`, reverse DNS, DHCP leases, bundled OUI vendor table |
 | **IPv4 enforcement** | iptables/ip6tables tagged chains, MAC and IP rules, bidirectional, idempotent + verified, persisted across restarts |
 | **ARP black hole** | Bidirectional forged ARP on host topology, 2 s refresh, TTL cap, restore on exit, `ip_forward` guard |
-| **IPv6 enforcement** | MAC rules that survive SLAAC rotation, per-address `-s`/`-d` rules, `/64` prefix blocks, NDP inventory, **one-click merged block** |
+| **IPv6 enforcement** | MAC rules that survive SLAAC rotation, per-address `-s`/`-d` rules, `/64` prefix blocks, NDP inventory + NDP black hole, **one-click merged block** |
 | **Wi-Fi** | `hostapd_cli` deauth when this host is the AP, monitor-mode frame injection otherwise, honest refusal when the hardware can't |
 | **Tooling** | Bundled nmap 7.92 (7 presets) and bettercap 2.41.7 (4 presets), driven from the UI with server-side whitelists |
 | **Console** | Glass/bento UI, off-white + dark themes with a persisted toggle, live topology map, audit log, toasts, keyboard and reduced-motion support |
@@ -169,7 +169,8 @@ enforce.
   seen, status, and **Block / Unblock / Details / Wi-Fi cut / Rename**.
 - **Block dialog:** mode (Everything / MAC only / IP only), isolation (complete /
   internet-only), an IPv4 + IPv6 summary of what will be cut, optional "block the
-  whole IPv6 /64", gateway force-guard, and scope notes.
+  whole IPv6 /64" and "cut IPv6 at layer 2 (NDP)", gateway force-guard, and scope
+  notes.
 - **Details:** every probe field — mDNS instance, UPnP model, TLS certificate,
   SNMP, nmap ports/services/scripts, IPv6 addresses, raw JSON.
 - **Activity:** audit trail of scans, blocks, renames, deauths, restores.
@@ -232,6 +233,11 @@ OUTPUT   ────> CUTOFF_OUT         │   (L3 only — xt_mac is invalid o
   replies on unblock / stop / exit. If `ip_forward` is already on (Docker, VPN),
   interception is refused unless the L2 `FORWARD` drop is installed and verified —
   otherwise a block would silently become a MITM.
+- **Peers are not a snapshot.** While a block runs, the peer set is re-read every
+  `CUTOFF_PEER_REFRESH` seconds (10 by default) from the inventory plus the live
+  neighbour table, so a device that joins or is scanned later is poisoned too.
+  New pairs get a forged *request* first: a reply alone only updates a cache entry
+  the target already has. IPv6 peers are re-read the same way over NDP.
 
 **Guardrails:** own MACs, multicast/broadcast, unknown devices and malformed input
 are refused; the gateway needs an explicit `force` and warns that the whole
@@ -241,18 +247,27 @@ network will drop.
 
 ## IPv6
 
-IPv6 bypasses ARP entirely, so it gets its own path.
+IPv6 bypasses ARP entirely, so it gets its own path: ip6tables rules plus an
+NDP black hole for traffic the router forwards on the victim's behalf.
 
 | Rule | Where | Stops |
 |---|---|---|
 | MAC match (`--mac-source`) | `CUTOFF_BLOCK` (INPUT/FORWARD) | every IPv6 packet from that adapter this host sees, including rotated privacy addresses |
 | per-address `-s`/`-d` | `CUTOFF_BLOCK` + `CUTOFF_OUT` | the known global/ULA/link-local addresses in both directions |
 | prefix (`-s`/`-d <prefix>`) | both chains | anything the device generates inside a `/64` |
+| NDP black hole (neighbor advertisements) | frame level | off-link IPv6: the victim's default-router entry is forged to this host's MAC |
 
 - The NDP cache (`ip -6 neigh`) is the only v6→MAC mapping. It is merged into the
   inventory on every scan, and addresses that rotate away are cleared.
 - **One click on Devices blocks both families.** If the inventory has no v6
   address yet, the enforcer asks the kernel's NDP cache before giving up.
+- The NDP black hole is on by default in the Block dialog. It claims the default
+  router's link-local address to the victim, claims each victim address to the
+  router, and (complete isolation) to every known peer. Because the router entry
+  is what carries off-link traffic, rotating the source address does not get v6
+  back. It is best-effort: a host that ignores unsolicited neighbour
+  advertisements, or SEND-enabled networks, defeat it. Refused when IPv6
+  forwarding is on without a `FORWARD` drop, and never applied to the router itself.
 - The optional `/64` keeps SLAAC privacy addresses dead after rotation, at the
   cost of cutting IPv6 for every host in that prefix.
 - Guards: v6 only, at most a `/16` wide, `/128` refused, and a prefix containing

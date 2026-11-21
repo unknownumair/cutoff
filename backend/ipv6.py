@@ -243,6 +243,66 @@ def neighbours(iface: str) -> list[dict]:
     return records
 
 
+_DEFAULT_ROUTE_RE = re.compile(r"^\s*default\s+via\s+(\S+)(?:\s+dev\s+(\S+))?")
+
+
+def parse_default_route(text: str, iface: str = "") -> str | None:
+    """Link-local address of the IPv6 default router, from ``ip -6 route``.
+
+    ``ip -6 route show default dev X`` omits ``dev X`` from its output, so the
+    device group must stay optional or every lookup silently returns None.
+    """
+    for line in (text or "").splitlines():
+        match = _DEFAULT_ROUTE_RE.match(line)
+        if not match:
+            continue
+        via, dev = match.groups()
+        if iface and dev and dev != iface:
+            continue
+        try:
+            addr = str(ipaddress.ip_address(via.split("%", 1)[0]))
+        except ValueError:
+            continue
+        if ipaddress.ip_address(addr).is_link_local:
+            return addr
+    return None
+
+
+def default_router(iface: str = "") -> str | None:
+    """Ask the kernel for the v6 default router (NDP poisoning target)."""
+    if platform_ops.IS_WINDOWS:
+        return None
+    cmd = ["ip", "-6", "route", "show", "default"] + (["dev", iface] if iface else [])
+    rc, out, _ = _run(cmd)
+    return parse_default_route(out, iface) if rc == 0 else None
+
+
+def router_mac(iface: str, router_ip: str, fallback: str | None = None) -> str | None:
+    """MAC that owns the default router; NDP cache first, v4 gateway MAC second.
+
+    The same box serves both families, so the IPv4 gateway MAC is a sound
+    fallback when the v6 neighbour entry has aged out.
+    """
+    for record in neighbours(iface):
+        if record.get("ip") == router_ip and record.get("mac"):
+            return record["mac"]
+    return (fallback or "").lower() or None
+
+
+def link_local_for(iface: str, mac: str) -> str | None:
+    """The victim's link-local address — the only always-on-link v6 target."""
+    mac = (mac or "").lower()
+    for record in neighbours(iface):
+        if (record.get("mac") or "").lower() == mac:
+            addr = record.get("ip") or ""
+            try:
+                if ipaddress.ip_address(addr).is_link_local:
+                    return addr
+            except ValueError:
+                continue
+    return None
+
+
 def _read_sysctl(path: str) -> str | None:
     try:
         with open(path, encoding="utf-8") as fh:

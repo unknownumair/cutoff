@@ -15,6 +15,7 @@ import ipaddress
 import logging
 import threading
 import time
+from typing import Any
 
 import config
 import ipv6
@@ -24,8 +25,10 @@ import wifi
 
 if platform_ops.IS_WINDOWS:
     import arpguard_win as arpguard
+    ndpguard = None
 else:
     import arpguard
+    import ndpguard
 from firewall import Firewall
 from netinfo import Interface, local_macs, run
 from store import Store, norm_mac
@@ -33,6 +36,8 @@ from store import Store, norm_mac
 log = logging.getLogger("cutoff.enforcer")
 
 MULTICAST_MACS = {"ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01"}
+# Upper bound on peers added to a black hole, to keep the frame rate sane.
+_MAX_PEERS = 64
 
 
 def _valid_ip(value: str) -> bool:
@@ -51,6 +56,7 @@ class Enforcer:
         self.iface = iface
         self.simulate = simulate
         self._interceptors: dict[str, arpguard.ArpBlackhole] = {}
+        self._ndp: dict[str, Any] = {}
         self._lock = threading.RLock()
         self.gateway_override = False
 
@@ -91,6 +97,7 @@ class Enforcer:
             "firewall": self.fw.status(),
             "wifi": caps,
             "interceptions": [i.status() for i in self._interceptors.values()],
+            "ndp": [i.status() for i in self._ndp.values()],
         }
 
     # guardrails ------------------------------------------------------------
@@ -112,7 +119,7 @@ class Enforcer:
     # block / unblock -------------------------------------------------------
     def block(self, mac: str, mode: str = "both", force: bool = False,
               isolation: str = "full", ip6: bool = True,
-              ip6_prefix: bool = False) -> dict:
+              ip6_prefix: bool = False, ip6_ndp: bool = True) -> dict:
         try:
             mac = norm_mac(mac)
         except ValueError as exc:
@@ -206,11 +213,8 @@ class Enforcer:
                     layers.append(f"arp-blackhole:{isolation}")
                     if isolation == "full":
                         warnings.append(
-                            "full isolation covers IPv4 and currently known peers; "
-                            + ("IPv6 is covered for the known addresses above, but "
-                               "later addresses and new peers need gateway/AP enforcement"
-                               if ip6_addrs else
-                               "IPv6 and peers discovered later need gateway/AP enforcement"))
+                            "IPv4 full isolation: gateway + every known LAN peer, "
+                            f"peer list re-read every {int(config.PEER_REFRESH_SEC)}s")
                 else:
                     warnings.append(f"arp-blackhole: {msg}")
         elif topology != "gateway" and mode == "mac":
@@ -218,6 +222,28 @@ class Enforcer:
                 "MAC-only mode on a non-gateway host only filters traffic to this "
                 "machine; choose 'both' + isolation=full for a complete block"
             )
+
+        # IPv6 layer 2: NDP is the only thing on an ordinary host that can cut
+        # traffic the router forwards for the victim. Best effort by nature —
+        # report what really started, never pretend coverage.
+        ndp_info: dict = {}
+        if (ip6_ndp and ndpguard is not None and topology != "gateway"
+                and mode in ("ip", "both") and ip6_addrs):
+            ok, msg, ndp_info = self._start_ndp(mac, device, ip6_addrs,
+                                                isolation, l2_blocked)
+            if ok:
+                layers.append(f"ndp-blackhole:{isolation}")
+                warnings.append(
+                    f"IPv6 layer 2: NDP black-hole over {len(ip6_addrs)} known "
+                    "address(es) + the default router"
+                    + ("; LAN peers are re-read from the neighbour cache and "
+                       f"inventory every {int(config.PEER_REFRESH_SEC)}s"
+                       if isolation == "full" else "")
+                    + ". Off-link IPv6 stays dead even if the source address "
+                      "rotates; peer-to-peer v6 is best-effort."
+                )
+            else:
+                warnings.append(f"IPv6 layer 2 not active: {msg}")
 
         if (platform_ops.IS_WINDOWS and topology != "gateway" and ip
                 and mode in ("ip", "both")
@@ -255,6 +281,7 @@ class Enforcer:
             "ip": ip,
             "ip6": ip6_addrs,
             "ip6_prefixes": prefixes6,
+            "ndp": ndp_info,
             "mode": mode,
             "isolation": isolation,
             "topology": topology,
@@ -284,6 +311,125 @@ class Enforcer:
             peers[ip] = mac
         return list(peers.items())
 
+    # peer refresh + IPv6 layer 2 -------------------------------------------
+    def _peer_provider(self, victim_mac: str):
+        """Live IPv4 peer list: inventory plus the kernel neighbour table.
+
+        Called from the poison thread every ``PEER_REFRESH_SEC``. The
+        neighbour table catches a device that started talking to this host
+        since the last scan; the inventory catches everything a scan found.
+        """
+        def provider() -> list[tuple[str, str]]:
+            peers: dict[str, str] = {}
+            for ip, mac in self._peer_list(victim_mac):
+                peers[ip] = mac
+            if self.iface:
+                try:
+                    live = netinfo.neighbour_table(self.iface.name)
+                except OSError:
+                    live = {}
+                own = local_macs()
+                gateway_mac = (self.iface.gateway_mac or "").lower()
+                for ip, mac in live.items():
+                    mac = (mac or "").lower()
+                    if not _valid_ip(ip) or not mac:
+                        continue
+                    if mac in own or mac == gateway_mac or mac == victim_mac:
+                        continue
+                    peers.setdefault(ip, mac)
+            return list(peers.items())[:_MAX_PEERS]
+        return provider
+
+    def _ndp_peers(self, victim_mac: str) -> list[dict]:
+        """Known LAN peers that have an IPv6 address, grouped by MAC."""
+        if not self.iface:
+            return []
+        own = local_macs()
+        gateway_mac = (self.iface.gateway_mac or "").lower()
+        grouped: dict[str, dict] = {}
+        for record in ipv6.neighbours(self.iface.name):
+            mac = (record.get("mac") or "").lower()
+            addr = record.get("ip") or ""
+            if not mac or not addr:
+                continue
+            if record.get("router"):
+                continue
+            if mac in own or mac == gateway_mac or mac == victim_mac:
+                continue
+            entry = grouped.setdefault(mac, {"mac": mac, "dst": "", "addrs": []})
+            if addr not in entry["addrs"]:
+                entry["addrs"].append(addr)
+            if not entry["dst"] and addr.startswith("fe80:"):
+                entry["dst"] = addr
+        peers = []
+        for entry in grouped.values():
+            if not entry["dst"]:
+                entry["dst"] = entry["addrs"][0]
+            peers.append(entry)
+        return peers[:_MAX_PEERS]
+
+    def _start_ndp(self, mac: str, device: dict, ip6_addrs: list[str],
+                   isolation: str, forward_blocked: bool
+                   ) -> tuple[bool, str, dict]:
+        if ndpguard is None:
+            return False, "NDP enforcement is Linux-only", {}
+        if not self.iface:
+            return False, "no interface", {}
+        name = self.iface.name
+        own6 = [a["address"] for a in ipv6.local_addresses(name)
+                if a.get("class") == "link-local"]
+        if not own6:
+            return False, "this host has no IPv6 link-local address", {}
+        router = ipv6.default_router(name)
+        if not router:
+            return False, "no IPv6 default router on this link", {}
+        router_mac = ipv6.router_mac(name, router, self.iface.gateway_mac)
+        if not router_mac:
+            return False, f"MAC for IPv6 router {router} is unknown", {}
+        victim_addrs = list(dict.fromkeys(ip6_addrs))
+        link_local = ipv6.link_local_for(name, device["mac"])
+        if link_local and link_local not in victim_addrs:
+            victim_addrs.append(link_local)
+        if not victim_addrs:
+            return False, "no IPv6 address known for the victim", {}
+        if router in victim_addrs or (router_mac or "").lower() == device["mac"].lower():
+            return False, ("the victim is the IPv6 default router; an NDP black hole "
+                           "would only poison the router for itself"), {}
+        try:
+            interceptor = ndpguard.NdpBlackhole(
+                iface=name,
+                our_mac=self.iface.mac,
+                our_ip6=own6[0],
+                victim_mac=device["mac"],
+                victim_addrs=victim_addrs[:ipv6.MAX_ADDRS_PER_DEVICE],
+                router_ip=router,
+                router_mac=router_mac,
+                peers=self._ndp_peers(device["mac"]),
+                total=isolation == "full",
+                refresh=config.POISON_REFRESH_SEC,
+                max_minutes=config.POISON_MAX_MIN,
+                forward_blocked=forward_blocked,
+                peer_provider=lambda: self._ndp_peers(device["mac"]),
+                peer_refresh=config.PEER_REFRESH_SEC,
+            )
+        except (ValueError, IndexError) as exc:
+            return False, f"invalid NDP parameters: {exc}", {}
+        with self._lock:
+            previous = self._ndp.pop(mac, None)
+        if previous:
+            previous.stop()
+        if self.simulate:
+            with self._lock:
+                self._ndp[mac] = interceptor
+            return (True, f"simulated NDP black-hole ({len(interceptor.pairs)} pairs)",
+                    interceptor.status())
+        ok, msg = interceptor.start()
+        if ok:
+            with self._lock:
+                self._ndp[mac] = interceptor
+            return True, msg, interceptor.status()
+        return False, msg, {}
+
     def _start_intercept(self, mac: str, ip: str, device_mac: str,
                          forward_blocked: bool = False,
                          isolation: str = "full") -> tuple[bool, str]:
@@ -307,6 +453,8 @@ class Enforcer:
                 refresh=config.POISON_REFRESH_SEC,
                 max_minutes=config.POISON_MAX_MIN,
                 forward_blocked=forward_blocked,
+                peer_provider=self._peer_provider(device_mac) if total else None,
+                peer_refresh=config.PEER_REFRESH_SEC,
             )
             if self.simulate:
                 # No raw socket in simulation mode; record intent only.
@@ -414,8 +562,11 @@ class Enforcer:
             return {"ok": False, "error": str(exc)}
         with self._lock:
             interceptor = self._interceptors.pop(mac, None)
+            ndp = self._ndp.pop(mac, None)
         if interceptor:
             interceptor.stop()
+        if ndp:
+            ndp.stop()
         record = self.store.block_for(mac) or {}
         fw = self.fw.unblock(mac)
         # Prefix rules are shared, not MAC-tagged: drop the ones this block
@@ -482,11 +633,18 @@ class Enforcer:
         with self._lock:
             interceptors = list(self._interceptors.values())
             self._interceptors.clear()
+            ndp_interceptors = list(self._ndp.values())
+            self._ndp.clear()
         for interceptor in interceptors:
             try:
                 interceptor.stop()
             except Exception:  # noqa: BLE001 - best effort restore
                 log.exception("failed to restore interception")
+        for interceptor in ndp_interceptors:
+            try:
+                interceptor.stop()
+            except Exception:  # noqa: BLE001 - best effort restore
+                log.exception("failed to restore NDP interception")
         fw = self.fw.panic()
         cleared = 0
         for mac in list(self.store.blocks()):

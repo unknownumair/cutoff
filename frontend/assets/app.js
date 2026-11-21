@@ -611,6 +611,8 @@
         </div>
         ${v6Prefix && !dev.is_self ? `<label class="choice" style="margin-top:8px"><input type="checkbox" id="prefix6">
           <span><b>Also block the whole IPv6 /64</b><small>SLAAC privacy addresses rotate; the covering prefix for ${esc(v6Prefix)} stays blocked. Every host inside that /64 loses IPv6 reachability.</small></span></label>` : ''}
+        <label class="choice" style="margin-top:8px"><input type="checkbox" id="ndp6" checked>
+          <span><b>Also cut IPv6 at layer 2 (NDP)</b><small>Poisons the victim's default-router entry and every peer's neighbour entry in both directions — the v6 equivalent of the ARP black hole. Kills off-link IPv6 even if the device rotates its address. Best effort: a host that ignores unsolicited neighbour advertisements keeps v6.</small></span></label>
       </div>` : ''}
       <div class="field" style="margin-top:14px"><span>Block depth</span>
         <div class="choices">
@@ -623,7 +625,7 @@
       <div class="note ${isHost ? 'warn' : ''}">
         ${I.info}
         <span>${isHost
-          ? 'This host is not the gateway. iptables drops traffic in both directions, and ARP black-holing cuts the device off the gateway; Complete isolation also poisons every known LAN peer. Refreshed every 2 s and fully restored on unblock.'
+          ? 'This host is not the gateway. iptables drops traffic in both directions, and ARP black-holing cuts the device off the gateway; Complete isolation also poisons every known LAN peer, and NDP does the same for IPv6. Peer lists are re-read every 10 s. Refreshed every 2 s and fully restored on unblock.'
           : 'This host is forwarding as a gateway/AP, so the firewall rules cover the device’s whole path.'}</span>
       </div>
       ${dev.is_gateway ? `<div class="note danger">${I.alert}<span><b>This MAC is your gateway.</b> Blocking it disconnects the entire network, including this machine.</span>
@@ -639,6 +641,7 @@
         const isolation = ($('input[name=isolation]:checked', modal) || {}).value || 'full';
         const forceBox = $('#forceBlock', modal);
         const prefix6Box = $('#prefix6', modal);
+        const ndp6Box = $('#ndp6', modal);
         if (dev.is_gateway && (!forceBox || !forceBox.checked)) {
           $('#forceNote', modal).style.display = 'flex';
           return false;
@@ -650,6 +653,7 @@
             force: Boolean(forceBox && forceBox.checked),
             ip6: true,
             ip6_prefix: Boolean(prefix6Box && prefix6Box.checked),
+            ip6_ndp: ndp6Box ? Boolean(ndp6Box.checked) : true,
           },
         });
         if (!result.ok) {
