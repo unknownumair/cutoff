@@ -3,6 +3,40 @@
 All notable changes to CUTOFF. Format: [Keep a Changelog](https://keepachangelog.com/),
 versioning: [SemVer](https://semver.org/).
 
+## [1.3.0] — 2026-11-26
+
+### Added
+- **IPv6 layer-2 blocking (NDP black hole).** Forged Neighbor Advertisements
+  claim the default router's link-local address to the victim, each victim
+  address to the router, and (complete isolation) every known peer to both
+  sides. Off-link IPv6 dies even when the device rotates its source address,
+  because the poisoned entry is the router, not the address. Frames are
+  checksum-correct NA/NS (next-header 58, hop limit 255, Override flag) and are
+  primed with a solicitation first, since a host ignores an NA for a target it
+  has never resolved. Refused when IPv6 forwarding is on without a verified
+  `FORWARD` drop, and never applied to the router itself.
+- **Live peer refresh while a block is active.** Every `CUTOFF_PEER_REFRESH`
+  seconds (default 10) the poison loops re-read the peer set from the inventory
+  plus the live IPv4/IPv6 neighbour tables, so devices that join or are scanned
+  after the block are covered too. New pairs get a forged request frame first:
+  a reply alone only updates a cache entry the target already has.
+- Block dialog: “cut IPv6 at layer 2 (NDP)” toggle, checked by default whenever
+  the device has an IPv6 address.
+- Block responses carry `ndp` (router, targets, pair/peer counts); capabilities
+  and status expose the NDP interceptors. `unblock` and `Restore all` stop them.
+
+### Changed
+- The block warnings now state what started instead of claiming IPv6 and later
+  peers need gateway/AP enforcement: “IPv6 layer 2: NDP black-hole over N
+  known address(es) + the default router… peer-to-peer v6 is best-effort.”
+
+### Fixed
+- `ip -6 route show default dev X` omits the `dev` group from its output, so
+  the router link-local silently resolved to nothing and the v6 layer would
+  never have started. The parser now treats the device group as optional.
+- NDP is skipped (with a warning) when the victim is the IPv6 default router,
+  instead of sending the router advertisements about itself.
+
 ## [1.2.0] — 2026-11-18
 
 ### Added
